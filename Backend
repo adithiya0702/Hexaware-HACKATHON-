@@ -1,0 +1,118 @@
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import sqlite3, json, os
+from dotenv import load_dotenv
+from pydantic import BaseModel
+from openai import OpenAI
+
+# ✅ Load GPT key from .env
+load_dotenv()
+client = OpenAI()  # NEW OpenAI client
+
+DB_PATH = "learning.db"
+
+# ✅ Initialize FastAPI
+app = FastAPI(title="Personalized Learning Backend")
+
+# ✅ Allow frontend to call backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # allow all origins
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ✅ Create database with sample user if empty
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS users(
+        id INTEGER PRIMARY KEY,
+        name TEXT,
+        target_role TEXT,
+        progress INT,
+        next_assessment TEXT,
+        skills TEXT
+    )""")
+    cur.execute("SELECT COUNT(*) FROM users")
+    if cur.fetchone()[0] == 0:
+        skills = json.dumps({"Python":4,"AWS":2,"React":2,"Java":3})
+        cur.execute("INSERT INTO users VALUES(1,'Jaya','Cloud Expert',75,'Aug 5, 2025',?)",(skills,))
+        conn.commit()
+    conn.close()
+
+init_db()
+
+# ✅ GPT helper (NEW syntax)
+def gpt_answer(prompt: str):
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You are a helpful AI learning mentor."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return response.choices[0].message.content.strip()
+
+# ✅ Ask AI request model
+class AskAIRequest(BaseModel):
+    query: str
+
+# ✅ Profile API
+@app.get("/api/profile/{user_id}")
+def get_profile(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT name,target_role,progress,next_assessment,skills FROM users WHERE id=?",(user_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(404, "User not found")
+
+    name, role, prog, assess, skills_json = row
+    skills = json.loads(skills_json)
+
+    return {
+        "name": name,
+        "progress": prog,
+        "targetRole": role,
+        "nextAssessment": assess,
+        "aiTip": "Focus on AWS basics first!",
+        "skills": skills,
+        "learningPath": [
+            {"title":"Cloud Computing Basics","category":"Cloud","difficulty":"Easy","progress":60,"status":"In Progress"},
+            {"title":"AWS Fundamentals","category":"Cloud","difficulty":"Medium","progress":0,"status":"Not Started"}
+        ],
+        "recommendations": [
+            {"title":"AWS Serverless Architecture","reason":"You scored low on AWS basics"},
+            {"title":"React Hooks Deep Dive","reason":"Your frontend skills need improvement"}
+        ],
+        "progressStages":[
+            {"name":"Profile Loaded","completed":True},
+            {"name":"Assessment Pending","completed":False},
+            {"name":"Assessment Completed","completed":True},
+            {"name":"Recommendations Generated","completed":True},
+            {"name":"Learning In Progress","completed":True}
+        ]
+    }
+
+# ✅ Ask AI API
+@app.post("/api/ask_ai")
+def ask_ai(req: AskAIRequest):
+    return {"answer": gpt_answer(req.query)}
+
+# ✅ Quiz API
+@app.get("/api/assessment/generate")
+def quiz(topic: str="AWS"):
+    prompt = f"Create 3 multiple choice quiz questions for {topic}. Return as JSON list with question, options(list), correct_answer."
+    gpt_out = gpt_answer(prompt)
+    try:
+        quiz_data = json.loads(gpt_out)
+    except:
+        quiz_data = [{"question":"Which AWS service is serverless?","options":["EC2","Lambda","S3","ECS"],"correct_answer":"Lambda"}]
+    return {"quiz":quiz_data,"total_questions":len(quiz_data)}
+
+@app.get("/")
+def home():
+    return {"message":"Backend running","profile":"/api/profile/1"}
